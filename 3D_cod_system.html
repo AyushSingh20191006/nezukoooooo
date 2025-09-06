@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Custom 3D Model Viewer with Measurement</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; background-color: #111827; }
+        #info-panel { position: absolute; top: 10px; left: 10px; padding: 12px; background-color: rgba(17, 24, 39, 0.8); color: white; border: 1px solid #374151; border-radius: 8px; font-size: 14px; max-width: 300px; }
+        #loading-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(17, 24, 39, 0.9); display: flex; justify-content: center; align-items: center; color: white; font-size: 1.2rem; z-index: 100; }
+        canvas { display: block; cursor: crosshair; }
+        button { pointer-events: auto; }
+    </style>
+</head>
+<body>
+    <div id="info-panel">
+        <h1 class="text-lg font-bold text-cyan-400">3D Viewer & Measurement Tool</h1>
+        <div id="coords-display" class="mt-2 p-2 bg-gray-800 rounded-md"><p class="text-gray-400">Loading scene...</p></div>
+        
+        <div id="measurement-panel" class="mt-4">
+            <h2 class="font-bold text-cyan-400">Distance Measurement</h2>
+            <p class="text-sm text-gray-300 mt-1">Click on two points on any object to measure the distance between them.</p>
+            <div id="measurement-result" class="mt-2 p-2 bg-gray-800 rounded-md text-gray-400">No points selected.</div>
+            <button id="clear-measurement-btn" class="mt-2 w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition-colors duration-200">Clear Measurement</button>
+        </div>
+    </div>
+    <div id="loading-overlay">Loading 3D Models... Please Wait.</div>
+
+    <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        let scene, camera, renderer, controls;
+        let raycaster, mouse;
+        let objectsToRaycast = [];
+        let hoverMarker, measurementPoints = [], measurementMarkers = [], measurementLine;
+
+        const coordsDisplay = document.getElementById('coords-display');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const measurementResult = document.getElementById('measurement-result');
+        const clearBtn = document.getElementById('clear-measurement-btn');
+
+        // https://raw.githubusercontent.com/AyushSingh20191006/my-3d-models-new/main/tabletopbest.glb ---
+        const objectSettings = [
+            // IMPORTANT: If your model appears too small, increase the scale values below.
+            // For example, from (1, 1, 1) to (10, 10, 10) or (100, 100, 100).
+            { name: '3D model coordinates', url: 'https://raw.githubusercontent.com/AyushSingh20191006/nezukoooooo/main/tanjirofinal.glb', position: new THREE.Vector3(0, 0, 0), scale: new THREE.Vector3(10, 10, 10) }
+        ];
+
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111827);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
+            camera.position.set(5, 5, 5);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.target.set(0, 0, 0); // Target the model's origin
+            controls.enableDamping = true;
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            directionalLight.position.set(80, 100, 50);
+            directionalLight.castShadow = true;
+            scene.add(directionalLight);
+
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+
+            // --- Markers ---
+            hoverMarker = createMarker(0xFBBF24, 0.3); // Yellow hover marker
+            measurementMarkers.push(createMarker(0x10B981, 0.4)); // Green measurement point 1
+            measurementMarkers.push(createMarker(0x10B981, 0.4)); // Green measurement point 2
+            scene.add(hoverMarker, measurementMarkers[0], measurementMarkers[1]);
+            
+            loadModels();
+
+            // --- Event Listeners ---
+            window.addEventListener('resize', onWindowResize, false);
+            renderer.domElement.addEventListener('mousemove', onMouseMove, false);
+            renderer.domElement.addEventListener('click', onClick, false);
+            clearBtn.addEventListener('click', clearMeasurement);
+        }
+
+        function createMarker(color, size) {
+            const geometry = new THREE.SphereGeometry(size, 16, 16);
+            const material = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.8 });
+            const marker = new THREE.Mesh(geometry, material);
+            marker.visible = false;
+            return marker;
+        }
+
+        function loadModels() {
+            const loadingManager = new THREE.LoadingManager(() => {
+                loadingOverlay.style.display = 'none';
+                animate();
+            });
+            const gltfLoader = new GLTFLoader(loadingManager);
+            objectSettings.forEach(setting => {
+                gltfLoader.load(setting.url, gltf => {
+                    const model = gltf.scene;
+                    model.position.copy(setting.position);
+                    model.scale.copy(setting.scale);
+                    model.traverse(child => {
+                        if (child.isMesh) {
+                            child.castShadow = true;
+                            child.receiveShadow = true;
+                            objectsToRaycast.push(child);
+                        }
+                    });
+                    scene.add(model);
+                }, undefined, (error) => {
+                    console.error('There was an error loading ' + setting.url, error);
+                    coordsDisplay.innerHTML = `<p class="text-red-500">Error: Could not load model. Check the URL and your browser's console.</p>`;
+                    loadingOverlay.style.display = 'none';
+                });
+            });
+        }
+
+        function onWindowResize() { 
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onMouseMove(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        }
+
+        function onClick(event) {
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(objectsToRaycast);
+            if (intersects.length > 0 && measurementPoints.length < 2) {
+                const point = intersects[0].point;
+                measurementPoints.push(point.clone());
+                
+                const marker = measurementMarkers[measurementPoints.length - 1];
+                marker.position.copy(point);
+                marker.visible = true;
+
+                updateMeasurement();
+            }
+        }
+
+        function clearMeasurement() {
+            measurementPoints = [];
+            measurementMarkers.forEach(m => m.visible = false);
+            if (measurementLine) {
+                scene.remove(measurementLine);
+                measurementLine.geometry.dispose();
+                measurementLine.material.dispose();
+                measurementLine = null;
+            }
+            measurementResult.innerHTML = "No points selected.";
+        }
+
+        function updateMeasurement() {
+            if (measurementPoints.length === 1) {
+                measurementResult.innerHTML = "First point selected. Click a second point.";
+            } else if (measurementPoints.length === 2) {
+                const distance = measurementPoints[0].distanceTo(measurementPoints[1]);
+                measurementResult.innerHTML = `Distance: <span class="font-bold text-white">${distance.toFixed(3)} units</span>`;
+
+                if (measurementLine) scene.remove(measurementLine);
+                const material = new THREE.LineBasicMaterial({ color: 0x10B981, linewidth: 2 });
+                const points = [measurementPoints[0], measurementPoints[1]];
+                const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                measurementLine = new THREE.Line(geometry, material);
+                scene.add(measurementLine);
+            }
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(objectsToRaycast);
+            if (intersects.length > 0) {
+                const point = intersects[0].point;
+                coordsDisplay.innerHTML = `<span class="text-red-400">X: ${point.x.toFixed(2)}</span>, <span class="text-green-400">Y: ${point.y.toFixed(2)}</span>, <span class="text-blue-400">Z: ${point.z.toFixed(2)}</span>`;
+                hoverMarker.position.copy(point);
+                hoverMarker.visible = true;
+            } else {
+                hoverMarker.visible = false;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
